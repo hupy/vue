@@ -1,13 +1,26 @@
 /* @flow */
 
-import { cached } from 'shared/util'
-import { warn } from 'core/util/index'
+import {
+  warn,
+  invokeWithErrorHandling
+} from 'core/util/index'
+import {
+  cached,
+  isUndef,
+  isTrue,
+  isPlainObject
+} from 'shared/util'
 
 const normalizeEvent = cached((name: string): {
   name: string,
   once: boolean,
-  capture: boolean
+  capture: boolean,
+  passive: boolean,
+  handler?: Function,
+  params?: Array<any>
 } => {
+  const passive = name.charAt(0) === '&'
+  name = passive ? name.slice(1) : name
   const once = name.charAt(0) === '~' // Prefixed last, checked first
   name = once ? name.slice(1) : name
   const capture = name.charAt(0) === '!'
@@ -15,29 +28,26 @@ const normalizeEvent = cached((name: string): {
   return {
     name,
     once,
-    capture
+    capture,
+    passive
   }
 })
 
-function createEventHandle (fn: Function | Array<Function>): {
-  fn: Function | Array<Function>;
-  invoker: Function;
-} {
-  const handle = {
-    fn,
-    invoker: function () {
-      const fn = handle.fn
-      if (Array.isArray(fn)) {
-        for (let i = 0; i < fn.length; i++) {
-          fn[i].apply(null, arguments)
-        }
-      } else {
-        // return handler return value for single handlers
-        return fn.apply(null, arguments)
+export function createFnInvoker (fns: Function | Array<Function>, vm: ?Component): Function {
+  function invoker () {
+    const fns = invoker.fns
+    if (Array.isArray(fns)) {
+      const cloned = fns.slice()
+      for (let i = 0; i < cloned.length; i++) {
+        invokeWithErrorHandling(cloned[i], null, arguments, vm, `v-on handler`)
       }
+    } else {
+      // return handler return value for single handlers
+      return invokeWithErrorHandling(fns, null, arguments, vm, `v-on handler`)
     }
   }
-  return handle
+  invoker.fns = fns
+  return invoker
 }
 
 export function updateListeners (
@@ -45,32 +55,41 @@ export function updateListeners (
   oldOn: Object,
   add: Function,
   remove: Function,
+  createOnceHandler: Function,
   vm: Component
 ) {
-  let name, cur, old, event
+  let name, def, cur, old, event
   for (name in on) {
-    cur = on[name]
+    def = cur = on[name]
     old = oldOn[name]
     event = normalizeEvent(name)
-    if (!cur) {
+    /* istanbul ignore if */
+    if (__WEEX__ && isPlainObject(def)) {
+      cur = def.handler
+      event.params = def.params
+    }
+    if (isUndef(cur)) {
       process.env.NODE_ENV !== 'production' && warn(
         `Invalid handler for event "${event.name}": got ` + String(cur),
         vm
       )
-    } else if (!old) {
-      if (!cur.invoker) {
-        cur = on[name] = createEventHandle(cur)
+    } else if (isUndef(old)) {
+      if (isUndef(cur.fns)) {
+        cur = on[name] = createFnInvoker(cur, vm)
       }
-      add(event.name, cur.invoker, event.once, event.capture)
+      if (isTrue(event.once)) {
+        cur = on[name] = createOnceHandler(event.name, cur, event.capture)
+      }
+      add(event.name, cur, event.capture, event.passive, event.params)
     } else if (cur !== old) {
-      old.fn = cur
+      old.fns = cur
       on[name] = old
     }
   }
   for (name in oldOn) {
-    if (!on[name]) {
+    if (isUndef(on[name])) {
       event = normalizeEvent(name)
-      remove(event.name, oldOn[name].invoker, event.capture)
+      remove(event.name, oldOn[name], event.capture)
     }
   }
 }
